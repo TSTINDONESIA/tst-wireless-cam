@@ -248,7 +248,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
         }
         setStatus("MENGHUBUNGKAN KE $ip:$port ...")
         try {
-            stream.startStream("srt://$ip:$port")
+            stream.startStream("srt://$ip:$port/live")
         } catch (e: Exception) {
             setStatus("GAGAL MULAI: ${e.message}")
             scheduleReconnect()
