@@ -252,7 +252,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
                     if (manualIris > 0f) builder.set(CaptureRequest.LENS_APERTURE, manualIris)
                 }
                 src.disableAutoFocus()
-                src.setFocusDistance(manualFocus)
+                src.setCustomRequest { builder -> builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, manualFocus) }
             } else {
                 src.enableAutoExposure()
                 src.enableAutoFocus()
@@ -375,7 +375,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
         exposurePanel.addView(sliderCard("Shutter Speed", shutterValue, 11, 6) { p -> val ns = listOf(1_000_000_000L, 500_000_000L, 250_000_000L, 125_000_000L, 66_666_666L, 33_333_333L, 10_000_000L, 5_000_000L, 2_500_000L, 1_000_000L, 500_000L)[p]; manualShutterNs = ns; shutterValue.text = shutterText(ns); applyCameraControls() })
 
         focusValue = text("AUTO", 11f, CYAN, true)
-        exposurePanel.addView(sliderCard("Focus Distance", focusValue, 100, 0) { p -> manualFocus = p / 100f; focusValue.text = if (p == 0) "AUTO" else String.format(Locale.US, "%.2f", manualFocus); if (manualCamera) try { camSource()?.setFocusDistance(manualFocus) } catch (_: Exception) {} })
+        exposurePanel.addView(sliderCard("Focus Distance", focusValue, 100, 0) { p -> manualFocus = p / 100f; focusValue.text = if (p == 0) "AUTO" else String.format(Locale.US, "%.2f", manualFocus); if (manualCamera) try { camSource()?.setCustomRequest { builder -> builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, manualFocus) } } catch (_: Exception) {} })
 
         irisValue = text("AUTO", 11f, AMBER, true)
         irisSeek = SeekBar(this)
@@ -406,7 +406,24 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
         etName = field(form, "Camera Name", "TST CAM 01", InputType.TYPE_CLASS_TEXT); etIp = field(form, "vMix PC IP", "192.168.1.10", InputType.TYPE_CLASS_TEXT); etPort = field(form, "SRT Port", "9001", InputType.TYPE_CLASS_NUMBER)
         spRes = spinner(form, "Resolution", resNames); spFps = spinner(form, "Frame Rate", fpsList.map { "$it FPS" }); spMode = spinner(form, "Latency / Quality", modeNames)
         swAuto = toggle(form, "Auto reconnect"); swAutoStart = toggle(form, "Auto start")
-        val save = Button(this).apply { text = "SAVE & APPLY"; setTextColor(WHITE); background = rounded(BLUE); setOnClickListener { saveConfig(); if (stream.isStreaming) toast("STOP dulu untuk menerapkan resolusi/FPS baru") else { try { if (stream.isOnPreview) stream.stopPreview() } catch (_: Exception) {}; prepared = false; showSettings(false); startPreviewIfPossible() } } }
+        val save = Button(this).apply {
+            text = "SAVE & APPLY"
+            setTextColor(WHITE)
+            background = rounded(BLUE)
+            setOnClickListener {
+                saveConfig()
+                if (stream.isStreaming) {
+                    toast("STOP dulu untuk menerapkan resolusi/FPS baru")
+                } else {
+                    try {
+                        if (stream.isOnPreview) stream.stopPreview()
+                    } catch (_: Exception) {}
+                    prepared = false
+                    showSettings(false)
+                    startPreviewIfPossible()
+                }
+            }
+        }
         form.addView(save, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(12) }); settingsPanel.addView(form)
         root.addView(settingsPanel, FrameLayout.LayoutParams(dp(370), MATCH, Gravity.END).apply { setMargins(0, dp(82), dp(10), dp(150) })
         return root
