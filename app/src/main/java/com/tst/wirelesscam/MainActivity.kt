@@ -8,7 +8,8 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
-import android.net.wifi.WifiManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
 import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
@@ -20,43 +21,39 @@ import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.SeekBar
-import android.widget.Spinner
-import android.widget.TextView
-import android.widget.Toast
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.pedro.common.ConnectChecker
-import com.pedro.library.srt.SrtStream
 import com.pedro.encoder.input.sources.video.Camera2Source
+import com.pedro.library.srt.SrtStream
+import java.util.Locale
 
 /**
- * TST Wireless Cam - kamera HP Android yang mengirim video + suara
- * langsung ke vMix lewat SRT di jaringan Wi-Fi lokal (tanpa internet).
+ * TST Wireless Cam
+ * Android camera -> SRT -> vMix.
  *
- * Di vMix: Add Input > Stream / SRT > mode Listener > port (mis. 9001).
- * Di aplikasi ini: isi IP PC vMix dan port yang sama, lalu START CAMERA.
+ * UI is intentionally built in code so the project remains small and easy to edit.
+ * Camera controls use RootEncoder Camera2Source where the Android device exposes them.
  */
 class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback {
 
     companion object {
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
-        private val NAVY = Color.parseColor("#050B1A")
-        private val PANEL = Color.parseColor("#CC0A1630")
-        private val CYAN = Color.parseColor("#00E5FF")
-        private val GREEN = Color.parseColor("#13A35A")
-        private val RED = Color.parseColor("#C62F3E")
-        private val BLUE = Color.parseColor("#1565C0")
-        private val GRAY = Color.parseColor("#2A3A5C")
+        private val BG = Color.parseColor("#040914")
+        private val PANEL = Color.parseColor("#101A2E")
+        private val PANEL_2 = Color.parseColor("#16243F")
+        private val BLUE = Color.parseColor("#1688FF")
+        private val CYAN = Color.parseColor("#18D8FF")
+        private val WHITE = Color.WHITE
+        private val MUTED = Color.parseColor("#91A2BD")
+        private val GREEN = Color.parseColor("#24D47B")
+        private val RED = Color.parseColor("#FF5264")
+        private val AMBER = Color.parseColor("#FFB547")
+        private val STROKE = Color.parseColor("#263858")
     }
 
     private val resNames = listOf("720p", "1080p", "1440p", "4K")
@@ -69,6 +66,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
     private lateinit var surface: SurfaceView
     private lateinit var prefs: SharedPreferences
     private val ui = Handler(Looper.getMainLooper())
+    private val retryHandler = Handler(Looper.getMainLooper())
 
     private var surfaceReady = false
     private var prepared = false
@@ -76,11 +74,18 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
     private var autoStartPending = false
     private var torchOn = false
     private var lastBitrateBps = 0L
-    private var status = "SIAP"
+    private var status = "READY"
+    private var manualCamera = false
+    private var manualIso = 400
+    private var manualShutterNs = 10_000_000L
+    private var manualFocus = 0f
+    private var manualIris = 0f
 
     private lateinit var statusView: TextView
     private lateinit var infoView: TextView
     private lateinit var settingsPanel: ScrollView
+    private lateinit var exposurePanel: LinearLayout
+    private lateinit var tabTitle: TextView
     private lateinit var etName: EditText
     private lateinit var etIp: EditText
     private lateinit var etPort: EditText
@@ -89,96 +94,77 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
     private lateinit var spMode: Spinner
     private lateinit var swAuto: SwitchCompat
     private lateinit var swAutoStart: SwitchCompat
-
-    // ---------------------------------------------------------------- lifecycle
+    private lateinit var swManual: SwitchCompat
+    private lateinit var isoValue: TextView
+    private lateinit var shutterValue: TextView
+    private lateinit var exposureValue: TextView
+    private lateinit var focusValue: TextView
+    private lateinit var irisValue: TextView
+    private lateinit var irisSeek: SeekBar
+    private lateinit var zoomSeek: SeekBar
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = getSharedPreferences("tst_cam", MODE_PRIVATE)
-
         surface = SurfaceView(this)
         surface.holder.addCallback(this)
         stream = SrtStream(this, this)
-
         setContentView(buildUi())
         loadConfig()
         autoStartPending = swAutoStart.isChecked
         ensurePermissions()
-        setStatus("SIAP")
+        setStatus("READY")
         ui.post(ticker)
     }
 
     override fun onDestroy() {
         ui.removeCallbacksAndMessages(null)
+        retryHandler.removeCallbacksAndMessages(null)
         try {
             if (stream.isStreaming) stream.stopStream()
             if (stream.isOnPreview) stream.stopPreview()
             stream.release()
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
         super.onDestroy()
     }
 
-    // ---------------------------------------------------------------- surface
-
     override fun surfaceCreated(holder: SurfaceHolder) {}
-
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         surfaceReady = true
         startPreviewIfPossible()
     }
-
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         surfaceReady = false
-        try {
-            if (stream.isOnPreview) stream.stopPreview()
-        } catch (_: Exception) {
-        }
+        try { if (stream.isOnPreview) stream.stopPreview() } catch (_: Exception) {}
     }
-
-    // ---------------------------------------------------------------- permissions
 
     private fun hasPerms(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     private fun ensurePermissions() {
-        if (!hasPerms()) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
-                10
-            )
-        }
+        if (!hasPerms()) ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO), 10)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (hasPerms()) startPreviewIfPossible() else setStatus("IZIN KAMERA/MIKROFON DITOLAK")
+        if (hasPerms()) startPreviewIfPossible() else setStatus("CAMERA / MIC PERMISSION DENIED")
     }
-
-    // ---------------------------------------------------------------- video config
 
     private fun selRes() = resSizes[spRes.selectedItemPosition.coerceAtLeast(0)]
     private fun selFps() = fpsList[spFps.selectedItemPosition.coerceAtLeast(0)]
     private fun selMode() = spMode.selectedItemPosition.coerceAtLeast(0)
-
     private fun targetBitrate(): Int {
         val (w, h) = selRes()
-        val bps = (w.toLong() * h * selFps() * modeFactor[selMode()]).toLong()
-        return bps.coerceIn(1_500_000L, 25_000_000L).toInt()
+        return (w.toLong() * h * selFps() * modeFactor[selMode()]).toLong().coerceIn(1_500_000L, 25_000_000L).toInt()
     }
 
-    /** prepareVideo/prepareAudio hanya boleh dipanggil saat preview & stream mati. */
     private fun prepare(): Boolean {
         val (w, h) = selRes()
         return try {
-            stream.prepareVideo(w, h, targetBitrate(), selFps()) &&
-                stream.prepareAudio(44100, true, 128 * 1000)
-        } catch (e: Exception) {
-            false
-        }
+            stream.prepareVideo(w, h, targetBitrate(), selFps()) && stream.prepareAudio(44100, true, 128 * 1000)
+        } catch (_: Exception) { false }
     }
 
     private fun startPreviewIfPossible() {
@@ -186,181 +172,94 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
         try {
             if (!prepared) {
                 prepared = prepare()
-                if (!prepared) {
-                    setStatus("RESOLUSI/FPS TIDAK DIDUKUNG HP INI")
-                    return
-                }
+                if (!prepared) { setStatus("RESOLUTION / FPS NOT SUPPORTED"); return }
             }
             if (!stream.isOnPreview) stream.startPreview(surface)
+            applyCameraControls()
         } catch (e: Exception) {
-            setStatus("KAMERA GAGAL: ${e.message}")
+            setStatus("CAMERA ERROR: ${e.message}")
             return
         }
-        if (wantStreaming) {
-            startNow()
-        } else if (autoStartPending) {
-            autoStartPending = false
-            clickStart()
-        }
+        if (wantStreaming) startNow() else if (autoStartPending) { autoStartPending = false; clickStart() }
     }
-
-    private fun applySettings() {
-        if (stream.isStreaming) {
-            toast("Tekan STOP CAMERA dulu supaya pengaturan berlaku")
-            return
-        }
-        saveConfig()
-        try {
-            if (stream.isOnPreview) stream.stopPreview()
-        } catch (_: Exception) {
-        }
-        prepared = false
-        startPreviewIfPossible()
-        settingsPanel.visibility = View.GONE
-    }
-
-    // ---------------------------------------------------------------- stream control
 
     private fun clickStart() {
-        if (!hasPerms()) {
-            ensurePermissions()
-            return
-        }
+        if (!hasPerms()) { ensurePermissions(); return }
         val ip = etIp.text.toString().trim()
         val port = etPort.text.toString().trim().toIntOrNull()
-        if (ip.isEmpty() || port == null) {
-            toast("Isi IP PC vMix dan Port di SETTINGS dulu")
-            settingsPanel.visibility = View.VISIBLE
-            return
-        }
-        saveConfig()
-        wantStreaming = true
-        startNow()
+        if (ip.isEmpty() || port == null) { toast("Isi IP PC vMix dan port di SETTINGS"); showSettings(true); return }
+        saveConfig(); wantStreaming = true; startNow()
     }
 
     private fun startNow() {
         if (stream.isStreaming || !surfaceReady) return
         val ip = etIp.text.toString().trim()
         val port = etPort.text.toString().trim().toIntOrNull() ?: return
-        if (!prepared) {
-            startPreviewIfPossible()
-            if (!prepared) return
-        }
-        setStatus("MENGHUBUNGKAN KE $ip:$port ...")
-        try {
-            stream.startStream("srt://$ip:$port/live")
-        } catch (e: Exception) {
-            setStatus("GAGAL MULAI: ${e.message}")
-            scheduleReconnect()
-        }
+        if (!prepared) { startPreviewIfPossible(); if (!prepared) return }
+        setStatus("CONNECTING  •  $ip:$port")
+        try { stream.startStream("srt://$ip:$port/live") } catch (e: Exception) { setStatus("START FAILED: ${e.message}"); scheduleReconnect() }
     }
 
     private fun clickStop() {
-        wantStreaming = false
-        retryHandler.removeCallbacksAndMessages(null)
-        try {
-            if (stream.isStreaming) stream.stopStream()
-        } catch (_: Exception) {
-        }
-        lastBitrateBps = 0
-        setStatus("BERHENTI")
+        wantStreaming = false; retryHandler.removeCallbacksAndMessages(null)
+        try { if (stream.isStreaming) stream.stopStream() } catch (_: Exception) {}
+        lastBitrateBps = 0; setStatus("STOPPED")
     }
 
     private fun onReconnect() {
         retryHandler.removeCallbacksAndMessages(null)
-        try {
-            if (stream.isStreaming) stream.stopStream()
-        } catch (_: Exception) {
-        }
-        wantStreaming = true
-        retryHandler.postDelayed({ startNow() }, 600)
+        try { if (stream.isStreaming) stream.stopStream() } catch (_: Exception) {}
+        wantStreaming = true; retryHandler.postDelayed({ startNow() }, 500)
     }
-
-    private val retryHandler = Handler(Looper.getMainLooper())
 
     private fun scheduleReconnect() {
         if (!wantStreaming || !swAuto.isChecked) return
         retryHandler.removeCallbacksAndMessages(null)
-        retryHandler.postDelayed({
-            if (wantStreaming && !stream.isStreaming) startNow()
-        }, 2000)
+        retryHandler.postDelayed({ if (wantStreaming && !stream.isStreaming) startNow() }, 2000)
     }
-
-    // ---------------------------------------------------------------- ConnectChecker (thread bukan UI)
 
     override fun onConnectionStarted(url: String) {}
-
-    override fun onConnectionSuccess() {
-        runOnUiThread { setStatus("MENGIRIM KE vMix") }
+    override fun onConnectionSuccess() = runOnUiThread { setStatus("LIVE  •  SENDING TO vMix") }
+    override fun onConnectionFailed(reason: String) = runOnUiThread {
+        try { if (stream.isStreaming) stream.stopStream() } catch (_: Exception) {}
+        lastBitrateBps = 0; setStatus("FAILED: $reason"); scheduleReconnect()
     }
-
-    override fun onConnectionFailed(reason: String) {
-        runOnUiThread {
-            try {
-                if (stream.isStreaming) stream.stopStream()
-            } catch (_: Exception) {
-            }
-            lastBitrateBps = 0
-            setStatus("GAGAL: $reason")
-            scheduleReconnect()
-        }
+    override fun onNewBitrate(bitrate: Long) { lastBitrateBps = bitrate }
+    override fun onDisconnect() = runOnUiThread {
+        lastBitrateBps = 0
+        if (wantStreaming && !status.startsWith("FAILED")) setStatus("DISCONNECTED")
+        scheduleReconnect()
     }
-
-    override fun onNewBitrate(bitrate: Long) {
-        lastBitrateBps = bitrate
-    }
-
-    override fun onDisconnect() {
-        runOnUiThread {
-            lastBitrateBps = 0
-            // jangan timpa pesan GAGAL (alasan error) dengan TERPUTUS
-            if (wantStreaming && !status.startsWith("GAGAL")) setStatus("TERPUTUS")
-            scheduleReconnect()
-        }
-    }
-
-    override fun onAuthError() {
-        runOnUiThread { setStatus("AUTH ERROR") }
-    }
-
+    override fun onAuthError() = runOnUiThread { setStatus("AUTH ERROR") }
     override fun onAuthSuccess() {}
 
-    // ---------------------------------------------------------------- camera controls
-
     private fun camSource(): Camera2Source? = stream.videoSource as? Camera2Source
+    private fun flip() { try { camSource()?.switchCamera(); torchOn = false; resetCameraControlsUi() } catch (_: Exception) { toast("Ganti kamera gagal") } }
+    private fun torch() { try { val src = camSource() ?: return; if (torchOn) src.disableLantern() else src.enableLantern(); torchOn = !torchOn } catch (_: Exception) { toast("Senter tidak tersedia") } }
+    private fun zoom(level: Float) { try { camSource()?.setZoom(level) } catch (_: Exception) {} }
 
-    private fun flip() {
+    /** Applies controls supported by Camera2/RootEncoder. Unsupported controls stay safely local. */
+    private fun applyCameraControls() {
+        val src = camSource() ?: return
         try {
-            camSource()?.switchCamera()
-            torchOn = false
-        } catch (e: Exception) {
-            toast("Ganti kamera gagal")
-        }
-    }
-
-    private fun torch() {
-        try {
-            val src = camSource() ?: return
-            if (torchOn) src.disableLantern() else src.enableLantern()
-            torchOn = !torchOn
-        } catch (e: Exception) {
-            toast("Senter tidak tersedia di kamera ini")
-        }
-    }
-
-    private fun zoom(level: Float) {
-        try {
-            camSource()?.setZoom(level)
+            if (manualCamera) {
+                src.disableAutoExposure()
+                src.setExposure(exposureValue.tag as? Int ?: 0)
+                src.setCustomRequest { builder ->
+                    builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                    builder.set(CaptureRequest.SENSOR_SENSITIVITY, manualIso)
+                    builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, manualShutterNs)
+                    if (manualIris > 0f) builder.set(CaptureRequest.LENS_APERTURE, manualIris)
+                }
+                src.disableAutoFocus()
+                src.setFocusDistance(manualFocus)
+            } else {
+                src.enableAutoExposure()
+                src.enableAutoFocus()
+                src.setCustomRequest { builder -> builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON) }
+            }
         } catch (_: Exception) {
-        }
-    }
-
-    // ---------------------------------------------------------------- dashboard
-
-    private val ticker = object : Runnable {
-        override fun run() {
-            updateInfo()
-            ui.postDelayed(this, 1500)
+            // Device-specific Camera2 capabilities vary; keep stream alive.
         }
     }
 
@@ -370,221 +269,160 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
         val scale = bat?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
         val pct = if (level >= 0 && scale > 0) level * 100 / scale else -1
         val temp = (bat?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10.0
-
         val (w, h) = selRes()
         val mbps = lastBitrateBps / 1_000_000.0
-        val sb = StringBuilder()
-        sb.append("KAMERA   : ").append(etName.text.toString().ifBlank { "TST CAM" }).append('\n')
-        sb.append("RESOLUSI : ").append(resNames[spRes.selectedItemPosition.coerceAtLeast(0)])
-            .append(" (").append(w).append('x').append(h).append(")\n")
-        sb.append("FPS      : ").append(selFps()).append(" (diatur)\n")
-        sb.append("BITRATE  : ").append(String.format("%.1f Mbps (terukur)", mbps)).append('\n')
-        sb.append("MODE     : ").append(modeNames[selMode()]).append('\n')
-        sb.append("BATERAI  : ").append(if (pct >= 0) "$pct%" else "?")
-            .append("   SUHU: ").append(String.format("%.1f", temp)).append(" C\n")
-        sb.append("HP       : ").append(phoneIp()).append('\n')
-        sb.append("TUJUAN   : ").append(etIp.text.toString().ifBlank { "-" }).append(':')
-            .append(etPort.text.toString().ifBlank { "-" }).append('\n')
-        sb.append("LATENCY  : belum terukur")
-        if (temp >= 43.0) sb.append("\nPERINGATAN: HP PANAS")
-        infoView.text = sb.toString()
+        infoView.text = "${resNames[spRes.selectedItemPosition.coerceAtLeast(0)]}  •  ${selFps()} FPS   |   ${String.format(Locale.US, "%.1f", mbps)} Mbps\n" +
+                "BAT ${if (pct >= 0) "$pct%" else "?"}   •   TEMP ${String.format(Locale.US, "%.1f", temp)}°C   •   ${w}×${h}\n" +
+                "PHONE ${phoneIp()}   →   ${etIp.text.toString().ifBlank { "-" }}:${etPort.text.toString().ifBlank { "-" }}"
+        if (temp >= 43.0) setStatus("WARNING  •  PHONE HOT")
     }
 
     @Suppress("DEPRECATION")
-    private fun phoneIp(): String {
-        return try {
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            val ip = wm.connectionInfo.ipAddress
-            if (ip == 0) "tidak terhubung Wi-Fi"
-            else "${ip and 0xff}.${(ip shr 8) and 0xff}.${(ip shr 16) and 0xff}.${(ip shr 24) and 0xff}"
-        } catch (e: Exception) {
-            "?"
-        }
-    }
+    private fun phoneIp(): String = try {
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+        val ip = wm.connectionInfo.ipAddress
+        if (ip == 0) "NO WI-FI" else "${ip and 0xff}.${(ip shr 8) and 0xff}.${(ip shr 16) and 0xff}.${(ip shr 24) and 0xff}"
+    } catch (_: Exception) { "?" }
 
-    private fun setStatus(s: String) {
-        status = s
-        if (::statusView.isInitialized) statusView.text = "●  $s"
-    }
-
-    // ---------------------------------------------------------------- config
+    private fun setStatus(s: String) { status = s; if (::statusView.isInitialized) statusView.text = "●  $s" }
 
     private fun saveConfig() {
-        prefs.edit()
-            .putString("name", etName.text.toString())
-            .putString("ip", etIp.text.toString().trim())
-            .putString("port", etPort.text.toString().trim())
-            .putInt("res", spRes.selectedItemPosition)
-            .putInt("fps", spFps.selectedItemPosition)
-            .putInt("mode", spMode.selectedItemPosition)
-            .putBoolean("auto", swAuto.isChecked)
-            .putBoolean("autostart", swAutoStart.isChecked)
-            .apply()
+        prefs.edit().putString("name", etName.text.toString()).putString("ip", etIp.text.toString().trim()).putString("port", etPort.text.toString().trim())
+            .putInt("res", spRes.selectedItemPosition).putInt("fps", spFps.selectedItemPosition).putInt("mode", spMode.selectedItemPosition)
+            .putBoolean("auto", swAuto.isChecked).putBoolean("autostart", swAutoStart.isChecked).apply()
     }
 
     private fun loadConfig() {
-        etName.setText(prefs.getString("name", "TST CAM 01"))
-        etIp.setText(prefs.getString("ip", ""))
-        etPort.setText(prefs.getString("port", "9001"))
-        spRes.setSelection(prefs.getInt("res", 1))
-        spFps.setSelection(prefs.getInt("fps", 1))
-        spMode.setSelection(prefs.getInt("mode", 1))
-        swAuto.isChecked = prefs.getBoolean("auto", true)
-        swAutoStart.isChecked = prefs.getBoolean("autostart", false)
+        etName.setText(prefs.getString("name", "TST CAM 01")); etIp.setText(prefs.getString("ip", "")); etPort.setText(prefs.getString("port", "9001"))
+        spRes.setSelection(prefs.getInt("res", 1).coerceIn(0, resNames.lastIndex)); spFps.setSelection(prefs.getInt("fps", 1).coerceIn(0, fpsList.lastIndex)); spMode.setSelection(prefs.getInt("mode", 1).coerceIn(0, modeNames.lastIndex))
+        swAuto.isChecked = prefs.getBoolean("auto", true); swAutoStart.isChecked = prefs.getBoolean("autostart", false)
     }
-
-    // ---------------------------------------------------------------- UI (dibuat lewat kode)
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 
-    private fun btn(title: String, color: Int, onClick: () -> Unit): Button {
-        val b = Button(this)
-        b.text = title
-        b.setTextColor(Color.WHITE)
-        b.setTypeface(b.typeface, Typeface.BOLD)
-        b.setBackgroundColor(color)
-        b.setOnClickListener { onClick() }
-        return b
+    private fun text(value: String, size: Float, color: Int, bold: Boolean = false): TextView = TextView(this).apply {
+        text = value; textSize = size; setTextColor(color); if (bold) typeface = Typeface.DEFAULT_BOLD
     }
 
-    private fun caption(parent: LinearLayout, title: String) {
-        val t = TextView(this)
-        t.text = title
-        t.setTextColor(CYAN)
-        t.textSize = 12f
-        t.setPadding(0, dp(10), 0, 0)
-        parent.addView(t)
+    private fun rounded(color: Int, stroke: Int = 0): android.graphics.drawable.GradientDrawable = android.graphics.drawable.GradientDrawable().apply {
+        setColor(color); cornerRadius = dp(12).toFloat(); if (stroke > 0) setStroke(dp(1), stroke)
     }
 
-    private fun field(parent: LinearLayout, title: String, hint: String, type: Int): EditText {
-        caption(parent, title)
-        val e = EditText(this)
-        e.hint = hint
-        e.setHintTextColor(Color.GRAY)
-        e.setTextColor(Color.WHITE)
-        e.inputType = type
-        e.setSingleLine()
-        parent.addView(e)
-        return e
+    private fun iconButton(symbol: String, label: String, click: () -> Unit): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(8), dp(10), dp(8), dp(8)); background = rounded(PANEL_2, STROKE)
+            addView(text(symbol, 21f, CYAN, true)); addView(text(label, 10f, WHITE, true), LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(3) }); setOnClickListener { click() }
+        }
     }
 
-    private fun spinner(parent: LinearLayout, title: String, items: List<String>): Spinner {
-        caption(parent, title)
-        val s = Spinner(this)
-        s.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
-        s.setBackgroundColor(Color.parseColor("#E8F7FF"))
-        parent.addView(s, LinearLayout.LayoutParams(MATCH, WRAP))
-        return s
+    private fun sliderCard(title: String, value: TextView, max: Int, progress: Int, onChange: (Int) -> Unit): LinearLayout {
+        val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = rounded(PANEL, STROKE); setPadding(dp(12), dp(9), dp(12), dp(7)) }
+        val head = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        head.addView(text(title, 12f, WHITE, true), LinearLayout.LayoutParams(0, WRAP, 1f)); head.addView(value)
+        card.addView(head)
+        val bar = SeekBar(this).apply { this.max = max; this.progress = progress; setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { if (fromUser) onChange(p) }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        }) }
+        card.addView(bar, LinearLayout.LayoutParams(MATCH, WRAP))
+        return card
     }
 
-    private fun toggle(parent: LinearLayout, title: String): SwitchCompat {
-        val s = SwitchCompat(this)
-        s.text = title
-        s.setTextColor(Color.WHITE)
-        s.setPadding(0, dp(10), 0, 0)
-        parent.addView(s)
-        return s
-    }
+    private fun showSettings(show: Boolean) { settingsPanel.visibility = if (show) View.VISIBLE else View.GONE }
 
     private fun buildUi(): View {
-        val root = FrameLayout(this)
-        root.setBackgroundColor(NAVY)
+        val root = FrameLayout(this).apply { setBackgroundColor(BG) }
         root.addView(surface, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        // status (kiri atas)
-        statusView = TextView(this)
-        statusView.textSize = 15f
-        statusView.setTextColor(CYAN)
-        statusView.setTypeface(statusView.typeface, Typeface.BOLD)
-        statusView.setBackgroundColor(PANEL)
-        statusView.setPadding(dp(12), dp(8), dp(12), dp(8))
-        val stLp = FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.START)
-        stLp.setMargins(dp(12), dp(12), 0, 0)
-        root.addView(statusView, stLp)
+        // dark overlay over preview, keeping camera image visible
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(18), dp(12), dp(18), dp(10)); background = rounded(Color.argb(225, 5, 12, 28)) }
+        val brand = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        brand.addView(text("TST CONTROL", 19f, WHITE, true)); brand.addView(text("PTZ • WIRELESS CAMERA", 10f, CYAN, true))
+        top.addView(brand, LinearLayout.LayoutParams(0, WRAP, 1f))
+        statusView = text("●  READY", 12f, CYAN, true); top.addView(statusView)
+        val topLp = FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP); topLp.setMargins(dp(10), dp(10), dp(10), 0); root.addView(top, topLp)
 
-        // dashboard (kanan atas)
-        infoView = TextView(this)
-        infoView.textSize = 11f
-        infoView.typeface = Typeface.MONOSPACE
-        infoView.setTextColor(Color.WHITE)
-        infoView.setBackgroundColor(PANEL)
-        infoView.setPadding(dp(10), dp(8), dp(10), dp(8))
-        val infoLp = FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END)
-        infoLp.setMargins(0, dp(12), dp(12), 0)
-        root.addView(infoView, infoLp)
+        infoView = text("", 10f, WHITE); infoView.typeface = Typeface.MONOSPACE; infoView.setPadding(dp(12), dp(8), dp(12), dp(8)); infoView.background = rounded(Color.argb(210, 8, 17, 34), STROKE)
+        val infoLp = FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END); infoLp.setMargins(0, dp(70), dp(12), 0); root.addView(infoView, infoLp)
 
-        // pengaturan (panel kanan)
-        settingsPanel = ScrollView(this)
-        settingsPanel.setBackgroundColor(Color.parseColor("#F00A1630"))
-        settingsPanel.visibility = View.GONE
-        val form = LinearLayout(this)
-        form.orientation = LinearLayout.VERTICAL
-        form.setPadding(dp(16), dp(16), dp(16), dp(16))
-        etName = field(form, "Nama kamera", "TST CAM 01", InputType.TYPE_CLASS_TEXT)
-        etIp = field(form, "IP PC vMix (lihat ipconfig di PC)", "192.168.1.10", InputType.TYPE_CLASS_TEXT)
-        etPort = field(form, "Port SRT (sama dengan di vMix)", "9001", InputType.TYPE_CLASS_NUMBER)
-        spRes = spinner(form, "Resolusi", resNames)
-        spFps = spinner(form, "Frame rate (FPS)", fpsList.map { "$it FPS" })
-        spMode = spinner(form, "Mode latency / kualitas", modeNames)
-        swAuto = toggle(form, "Auto reconnect")
-        swAutoStart = toggle(form, "Auto start saat aplikasi dibuka")
-        val save = btn("SIMPAN", BLUE) { applySettings() }
-        val saveLp = LinearLayout.LayoutParams(MATCH, WRAP)
-        saveLp.topMargin = dp(16)
-        form.addView(save, saveLp)
-        settingsPanel.addView(form)
-        val spLp = FrameLayout.LayoutParams(dp(340), MATCH, Gravity.END)
-        spLp.setMargins(0, dp(60), 0, dp(150))
-        root.addView(settingsPanel, spLp)
-
-        // kontrol bawah
-        val bottom = LinearLayout(this)
-        bottom.orientation = LinearLayout.VERTICAL
-        bottom.setBackgroundColor(PANEL)
-        bottom.setPadding(dp(12), dp(6), dp(12), dp(8))
-
-        val zoomRow = LinearLayout(this)
-        zoomRow.orientation = LinearLayout.HORIZONTAL
-        zoomRow.gravity = Gravity.CENTER_VERTICAL
-        val zoomLabel = TextView(this)
-        zoomLabel.text = "ZOOM"
-        zoomLabel.setTextColor(CYAN)
-        zoomLabel.textSize = 12f
-        zoomRow.addView(zoomLabel)
-        val zoomBar = SeekBar(this)
-        zoomBar.max = 40
-        zoomBar.progress = 0
-        zoomBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                if (fromUser) zoom(1f + p / 10f)
-            }
-
-            override fun onStartTrackingTouch(sb: SeekBar?) {}
-            override fun onStopTrackingTouch(sb: SeekBar?) {}
-        })
-        zoomRow.addView(zoomBar, LinearLayout.LayoutParams(0, WRAP, 1f))
-        bottom.addView(zoomRow, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        fun add(b: Button) {
-            val lp = LinearLayout.LayoutParams(0, WRAP, 1f)
-            lp.setMargins(dp(3), dp(3), dp(3), dp(3))
-            row.addView(b, lp)
+        // Right control rail
+        val rail = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(10), dp(10), dp(10)); background = rounded(Color.argb(235, 8, 15, 30), STROKE) }
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val tabNames = listOf("☀" to "Exposure", "◉" to "Image", "◎" to "Focus", "✣" to "PTZ", "⌁" to "Network")
+        tabNames.forEachIndexed { i, pair ->
+            val b = iconButton(pair.first, pair.second) { if (i == 0) { tabTitle.text = "EXPOSURE / CAMERA"; exposurePanel.visibility = View.VISIBLE } else { tabTitle.text = pair.second.uppercase(); exposurePanel.visibility = View.GONE; toast("Panel ${pair.second} siap dikembangkan") } }
+            tabs.addView(b, LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(3), 0, dp(3), 0) })
         }
-        add(btn("START CAMERA", GREEN) { clickStart() })
-        add(btn("STOP CAMERA", RED) { clickStop() })
-        add(btn("RECONNECT", BLUE) { onReconnect() })
-        add(btn("SETTINGS", GRAY) {
-            settingsPanel.visibility = if (settingsPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        })
-        add(btn("DEPAN/BELAKANG", GRAY) { flip() })
-        add(btn("SENTER", GRAY) { torch() })
-        bottom.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+        rail.addView(tabs)
+        tabTitle = text("EXPOSURE / CAMERA", 13f, CYAN, true); tabTitle.setPadding(dp(6), dp(12), dp(6), dp(8)); rail.addView(tabTitle)
 
-        root.addView(bottom, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+        exposurePanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val manualRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; background = rounded(PANEL_2, STROKE); setPadding(dp(12), dp(8), dp(12), dp(8)) }
+        manualRow.addView(text("MANUAL CAMERA", 12f, WHITE, true), LinearLayout.LayoutParams(0, WRAP, 1f))
+        swManual = SwitchCompat(this).apply { isChecked = false; setOnCheckedChangeListener { _, _ -> manualCamera = isChecked; applyCameraControls(); refreshManualUi() } }
+        manualRow.addView(swManual); exposurePanel.addView(manualRow)
+
+        exposureValue = text("0 EV", 11f, CYAN, true)
+        exposureValue.tag = 0
+        exposurePanel.addView(sliderCard("Exposure Compensation", exposureValue, 24, 12) { p -> val ev = p - 12; exposureValue.text = "${if (ev >= 0) "+" else ""}$ev EV"; exposureValue.tag = ev; if (manualCamera) try { camSource()?.setExposure(ev) } catch (_: Exception) {} })
+
+        isoValue = text("ISO 400", 11f, CYAN, true)
+        exposurePanel.addView(sliderCard("Gain / ISO", isoValue, 15, 5) { p -> manualIso = listOf(100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200).getOrElse(p) { 400 }; isoValue.text = "ISO $manualIso"; applyCameraControls() })
+
+        shutterValue = text("1/100", 11f, CYAN, true)
+        exposurePanel.addView(sliderCard("Shutter Speed", shutterValue, 11, 6) { p -> val ns = listOf(1_000_000_000L, 500_000_000L, 250_000_000L, 125_000_000L, 66_666_666L, 33_333_333L, 10_000_000L, 5_000_000L, 2_500_000L, 1_000_000L, 500_000L)[p]; manualShutterNs = ns; shutterValue.text = shutterText(ns); applyCameraControls() })
+
+        focusValue = text("AUTO", 11f, CYAN, true)
+        exposurePanel.addView(sliderCard("Focus Distance", focusValue, 100, 0) { p -> manualFocus = p / 100f; focusValue.text = if (p == 0) "AUTO" else String.format(Locale.US, "%.2f", manualFocus); if (manualCamera) try { camSource()?.setFocusDistance(manualFocus) } catch (_: Exception) {} })
+
+        irisValue = text("AUTO", 11f, AMBER, true)
+        irisSeek = SeekBar(this)
+        val irisCard = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = rounded(PANEL, STROKE); setPadding(dp(12), dp(9), dp(12), dp(7)) }
+        val irisHead = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; addView(text("Iris / Aperture", 12f, WHITE, true), LinearLayout.LayoutParams(0, WRAP, 1f)); addView(irisValue) }
+        irisCard.addView(irisHead); irisSeek.max = 100; irisCard.addView(irisSeek); exposurePanel.addView(irisCard)
+        irisSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener { override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) { manualIris = 1.4f + p / 100f * 7f; irisValue.text = String.format(Locale.US, "f/%.1f", manualIris); applyCameraControls() } }; override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {} })
+
+        exposurePanel.addView(toggleRow("Auto Exposure", false) { sw -> manualCamera = !sw; swManual.isChecked = !sw; applyCameraControls() })
+        exposurePanel.addView(toggleRow("Auto Focus", true) { auto -> try { if (auto) camSource()?.enableAutoFocus() else camSource()?.disableAutoFocus() } catch (_: Exception) {} })
+        rail.addView(exposurePanel)
+        val railLp = FrameLayout.LayoutParams(dp(390), MATCH, Gravity.END); railLp.setMargins(0, dp(82), dp(10), dp(145)); root.addView(rail, railLp)
+
+        // Bottom control deck
+        val bottom = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = rounded(Color.argb(238, 7, 15, 30), STROKE); setPadding(dp(10), dp(8), dp(10), dp(10)) }
+        val zoomRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        zoomRow.addView(text("ZOOM", 10f, CYAN, true)); zoomSeek = SeekBar(this).apply { max = 40; progress = 0; setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener { override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { if (f) zoom(1f + p / 10f) }; override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {} }) }; zoomRow.addView(zoomSeek, LinearLayout.LayoutParams(0, WRAP, 1f)); zoomRow.addView(text("1.0× → 5.0×", 9f, MUTED)); bottom.addView(zoomRow)
+        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun deckButton(label: String, color: Int, action: () -> Unit) { val b = Button(this); b.text = label; b.setTextColor(WHITE); b.textSize = 11f; b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.background = rounded(color, STROKE); b.setOnClickListener { action() }; controls.addView(b, LinearLayout.LayoutParams(0, dp(44), 1f).apply { setMargins(dp(3), dp(5), dp(3), 0) }) }
+        deckButton("▶  START", Color.parseColor("#0B7B4A")) { clickStart() }; deckButton("■  STOP", Color.parseColor("#8D2434")) { clickStop() }; deckButton("↻  RECONNECT", Color.parseColor("#1455A6")) { onReconnect() }; deckButton("⚙  SETTINGS", Color.parseColor("#243653")) { showSettings(settingsPanel.visibility != View.VISIBLE) }; deckButton("↔  FLIP", Color.parseColor("#243653")) { flip() }; deckButton("☼  LIGHT", Color.parseColor("#243653")) { torch() }
+        bottom.addView(controls)
+        root.addView(bottom, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM).apply { setMargins(dp(10), 0, dp(10), dp(10)) })
+
+        // Settings drawer
+        settingsPanel = ScrollView(this).apply { background = rounded(Color.argb(248, 8, 16, 31), STROKE); visibility = View.GONE }
+        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(16)) }
+        form.addView(text("NETWORK & STREAM SETTINGS", 15f, CYAN, true)); form.addView(text("SRT output configuration", 10f, MUTED))
+        etName = field(form, "Camera Name", "TST CAM 01", InputType.TYPE_CLASS_TEXT); etIp = field(form, "vMix PC IP", "192.168.1.10", InputType.TYPE_CLASS_TEXT); etPort = field(form, "SRT Port", "9001", InputType.TYPE_CLASS_NUMBER)
+        spRes = spinner(form, "Resolution", resNames); spFps = spinner(form, "Frame Rate", fpsList.map { "$it FPS" }); spMode = spinner(form, "Latency / Quality", modeNames)
+        swAuto = toggle(form, "Auto reconnect"); swAutoStart = toggle(form, "Auto start")
+        val save = Button(this).apply { text = "SAVE & APPLY"; setTextColor(WHITE); background = rounded(BLUE); setOnClickListener { saveConfig(); if (stream.isStreaming) toast("STOP dulu untuk menerapkan resolusi/FPS baru") else { try { if (stream.isOnPreview) stream.stopPreview() } catch (_: Exception) {}; prepared = false; showSettings(false); startPreviewIfPossible() } } }
+        form.addView(save, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(12) }); settingsPanel.addView(form)
+        root.addView(settingsPanel, FrameLayout.LayoutParams(dp(370), MATCH, Gravity.END).apply { setMargins(0, dp(82), dp(10), dp(150) })
         return root
     }
+
+    private fun toggleRow(label: String, checked: Boolean, action: (Boolean) -> Unit): LinearLayout = LinearLayout(this).apply {
+        gravity = Gravity.CENTER_VERTICAL; background = rounded(PANEL, STROKE); setPadding(dp(12), dp(4), dp(12), dp(4)); addView(text(label, 11f, WHITE, true), LinearLayout.LayoutParams(0, WRAP, 1f)); val sw = SwitchCompat(this@MainActivity).apply { isChecked = checked; setOnCheckedChangeListener { _, v -> action(v) } }; addView(sw)
+    }
+
+    private fun refreshManualUi() { val enabled = manualCamera; isoValue.alpha = if (enabled) 1f else .45f; shutterValue.alpha = if (enabled) 1f else .45f; focusValue.alpha = if (enabled) 1f else .45f }
+    private fun resetCameraControlsUi() { manualFocus = 0f; focusValue.text = "AUTO" }
+    private fun shutterText(ns: Long): String { val denom = (1_000_000_000L / ns.toDouble()).let { if (it >= 1) Math.round(it).toInt() else 0 }; return if (denom > 0) "1/$denom" else "${ns / 1_000_000}ms" }
+
+    private fun field(parent: LinearLayout, title: String, hint: String, type: Int): EditText { parent.addView(text(title, 10f, CYAN, true).apply { setPadding(0, dp(12), 0, dp(4)) }); return EditText(this).apply { this.hint = hint; setHintTextColor(MUTED); setTextColor(WHITE); inputType = type; setSingleLine(); background = rounded(PANEL_2, STROKE); setPadding(dp(12), 0, dp(12), 0); parent.addView(this, LinearLayout.LayoutParams(MATCH, dp(44)).apply { bottomMargin = dp(3) }) } }
+    private fun spinner(parent: LinearLayout, title: String, items: List<String>): Spinner { parent.addView(text(title, 10f, CYAN, true).apply { setPadding(0, dp(10), 0, dp(4)) }); return Spinner(this).apply { adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, items); background = rounded(PANEL_2, STROKE); parent.addView(this, LinearLayout.LayoutParams(MATCH, dp(44)).apply { bottomMargin = dp(3) }) } }
+    private fun toggle(parent: LinearLayout, title: String): SwitchCompat = SwitchCompat(this).apply { text = title; setTextColor(WHITE); parent.addView(this, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) }) }
+
+    private val ticker = object : Runnable { override fun run() { if (::infoView.isInitialized) updateInfo(); ui.postDelayed(this, 1500) } }
 }

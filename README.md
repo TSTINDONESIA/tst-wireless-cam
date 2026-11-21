@@ -1,18 +1,35 @@
-# TST Wireless Cam (Android)
+# TST Wireless Cam — Professional Control UI
 
-Kamera HP Android yang mengirim video + suara langsung ke **vMix** lewat **SRT**
-di jaringan Wi-Fi lokal (tanpa internet, tanpa aplikasi receiver, gratis).
+Aplikasi Android kamera wireless untuk mengirim video + audio langsung ke **vMix lewat SRT** pada jaringan Wi-Fi lokal.
 
-## Cara pakai
-1. Di PC: buka cmd, ketik `ipconfig`, catat **IPv4 Address**.
-2. Di vMix: **Add Input > Stream / SRT**, mode **Listener**, port **9001** (kamera ke-2 pakai 9002, dst.).
-3. Di HP: pasang APK, buka aplikasi, **SETTINGS** > isi IP PC dan port > **SIMPAN**.
-4. Tekan **START CAMERA**. Gambar muncul di input vMix.
+## Update UI
+- Dark premium broadcast-style dashboard.
+- Ikon kontrol untuk Exposure, Image, Focus, PTZ, dan Network.
+- Status LIVE, bitrate, resolusi, FPS, baterai, suhu, IP HP, dan tujuan vMix.
+- Bottom control deck: START, STOP, RECONNECT, SETTINGS, FLIP, LIGHT.
+- Zoom slider.
+- Settings drawer untuk IP vMix, port SRT, resolusi, FPS, latency/quality, auto reconnect dan auto start.
 
-## Membuat APK
-Setiap kali kode di-upload ke GitHub, tab **Actions** membuat APK otomatis.
-Unduh dari hasil run terbaru di bagian **Artifacts** (`TST-Wireless-Cam-APK`).
+## Manual Camera Control
+Panel **Exposure / Camera** menyediakan:
+- Manual / Auto Exposure.
+- Exposure Compensation.
+- Gain / ISO.
+- Shutter Speed.
+- Focus Distance / Auto Focus.
+- Iris / Aperture control bila hardware Camera2 Android mendukung kontrol aperture manual.
+
+Kontrol yang tidak didukung hardware kamera tidak akan mematikan stream; aplikasi tetap berjalan dengan kemampuan kamera yang tersedia.
+
+## vMix
+1. Di PC jalankan `ipconfig` dan ambil IPv4 Address.
+2. vMix → Add Input → Stream / SRT → Listener.
+3. Gunakan port, misalnya `9001`.
+4. Di HP buka SETTINGS → masukkan IP PC dan port → SAVE & APPLY.
+5. Tekan START CAMERA.
+
+## Build
+Workflow GitHub Actions pada `.github/workflows/build.yml` tetap dipertahankan. Upload project ke GitHub untuk menghasilkan APK dari workflow yang sudah ada.
 
 ## Catatan
-- Versi 0.1: Android saja. FPS dan resolusi adalah nilai yang diatur, latency belum diukur.
-- Setiap HP butuh port berbeda di vMix agar menjadi input terpisah.
+FPS/resolusi tetap mengikuti kemampuan encoder dan kamera Android yang digunakan. Manual ISO, shutter, focus, exposure, dan aperture bergantung pada dukungan Camera2 masing-masing perangkat.
