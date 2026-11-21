@@ -36,7 +36,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.pedro.common.ConnectChecker
 import com.pedro.library.srt.SrtStream
-import com.pedro.library.util.sources.video.Camera2Source
+import com.pedro.encoder.input.sources.video.Camera2Source
 
 /**
  * TST Wireless Cam - kamera HP Android yang mengirim video + suara
@@ -200,7 +200,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
             startNow()
         } else if (autoStartPending) {
             autoStartPending = false
-            onStart()
+            clickStart()
         }
     }
 
@@ -221,7 +221,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
 
     // ---------------------------------------------------------------- stream control
 
-    private fun onStart() {
+    private fun clickStart() {
         if (!hasPerms()) {
             ensurePermissions()
             return
@@ -255,7 +255,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
         }
     }
 
-    private fun onStop() {
+    private fun clickStop() {
         wantStreaming = false
         retryHandler.removeCallbacksAndMessages(null)
         try {
@@ -573,8 +573,8 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
             lp.setMargins(dp(3), dp(3), dp(3), dp(3))
             row.addView(b, lp)
         }
-        add(btn("START CAMERA", GREEN) { onStart() })
-        add(btn("STOP CAMERA", RED) { onStop() })
+        add(btn("START CAMERA", GREEN) { clickStart() })
+        add(btn("STOP CAMERA", RED) { clickStop() })
         add(btn("RECONNECT", BLUE) { onReconnect() })
         add(btn("SETTINGS", GRAY) {
             settingsPanel.visibility = if (settingsPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
