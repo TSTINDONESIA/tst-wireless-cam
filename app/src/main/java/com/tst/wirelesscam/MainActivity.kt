@@ -425,7 +425,7 @@ class MainActivity : AppCompatActivity(), ConnectChecker, SurfaceHolder.Callback
             }
         }
         form.addView(save, LinearLayout.LayoutParams(MATCH, dp(48)).apply { topMargin = dp(12) }); settingsPanel.addView(form)
-        root.addView(settingsPanel, FrameLayout.LayoutParams(dp(370), MATCH, Gravity.END).apply { setMargins(0, dp(82), dp(10), dp(150) })
+        root.addView(settingsPanel, FrameLayout.LayoutParams(dp(370), MATCH, Gravity.END).apply { setMargins(0, dp(82), dp(10), dp(150)) })
         return root
     }
 
